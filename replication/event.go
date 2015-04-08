@@ -299,6 +299,11 @@ func (e *GTIDEvent) Dump(w io.Writer) {
 	fmt.Fprintln(w)
 }
 
+func (e *GTIDEvent) GtidDesc() string {
+	u, _ := uuid.FromBytes(e.SID)
+	return fmt.Sprintf("%s:%d", u.String(), e.GNO)
+}
+
 // case MARIADB_ANNOTATE_ROWS_EVENT:
 // 	return "MariadbAnnotateRowsEvent"
 
