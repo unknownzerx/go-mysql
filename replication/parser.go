@@ -144,9 +144,9 @@ func (p *BinlogParser) parseEvent(h *EventHeader, data []byte) (Event, error) {
 			case TABLE_MAP_EVENT:
 				te := &TableMapEvent{}
 				if p.format.EventTypeHeaderLengths[TABLE_MAP_EVENT-1] == 6 {
-					te.tableIDSize = 4
+					te.TableIDSize = 4
 				} else {
-					te.tableIDSize = 6
+					te.TableIDSize = 6
 				}
 				e = te
 			case WRITE_ROWS_EVENTv0,
@@ -227,13 +227,13 @@ func (p *BinlogParser) parse(data []byte) (*BinlogEvent, error) {
 func (p *BinlogParser) newRowsEvent(h *EventHeader) *RowsEvent {
 	e := &RowsEvent{}
 	if p.format.EventTypeHeaderLengths[h.EventType-1] == 6 {
-		e.tableIDSize = 4
+		e.TableIDSize = 4
 	} else {
-		e.tableIDSize = 6
+		e.TableIDSize = 6
 	}
 
-	e.needBitmap2 = false
-	e.tables = p.tables
+	e.NeedBitmap2 = false
+	e.Tables = p.tables
 
 	switch h.EventType {
 	case WRITE_ROWS_EVENTv0:
@@ -248,12 +248,12 @@ func (p *BinlogParser) newRowsEvent(h *EventHeader) *RowsEvent {
 		e.Version = 1
 	case UPDATE_ROWS_EVENTv1:
 		e.Version = 1
-		e.needBitmap2 = true
+		e.NeedBitmap2 = true
 	case WRITE_ROWS_EVENTv2:
 		e.Version = 2
 	case UPDATE_ROWS_EVENTv2:
 		e.Version = 2
-		e.needBitmap2 = true
+		e.NeedBitmap2 = true
 	case DELETE_ROWS_EVENTv2:
 		e.Version = 2
 	}

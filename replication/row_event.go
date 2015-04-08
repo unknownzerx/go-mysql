@@ -15,7 +15,7 @@ import (
 )
 
 type TableMapEvent struct {
-	tableIDSize int
+	TableIDSize int
 
 	TableID uint64
 
@@ -34,8 +34,8 @@ type TableMapEvent struct {
 
 func (e *TableMapEvent) Decode(data []byte) error {
 	pos := 0
-	e.TableID = FixedLengthInt(data[0:e.tableIDSize])
-	pos += e.tableIDSize
+	e.TableID = FixedLengthInt(data[0:e.TableIDSize])
+	pos += e.TableIDSize
 
 	e.Flags = binary.LittleEndian.Uint16(data[pos:])
 	pos += 2
@@ -193,9 +193,9 @@ type RowsEvent struct {
 	//0, 1, 2
 	Version int
 
-	tableIDSize int
-	tables      map[uint64]*TableMapEvent
-	needBitmap2 bool
+	TableIDSize int
+	Tables      map[uint64]*TableMapEvent
+	NeedBitmap2 bool
 
 	Table *TableMapEvent
 
@@ -221,8 +221,8 @@ type RowsEvent struct {
 
 func (e *RowsEvent) Decode(data []byte) error {
 	pos := 0
-	e.TableID = FixedLengthInt(data[0:e.tableIDSize])
-	pos += e.tableIDSize
+	e.TableID = FixedLengthInt(data[0:e.TableIDSize])
+	pos += e.TableIDSize
 
 	e.Flags = binary.LittleEndian.Uint16(data[pos:])
 	pos += 2
@@ -243,13 +243,13 @@ func (e *RowsEvent) Decode(data []byte) error {
 	e.ColumnBitmap1 = data[pos : pos+bitCount]
 	pos += bitCount
 
-	if e.needBitmap2 {
+	if e.NeedBitmap2 {
 		e.ColumnBitmap2 = data[pos : pos+bitCount]
 		pos += bitCount
 	}
 
 	var ok bool
-	e.Table, ok = e.tables[e.TableID]
+	e.Table, ok = e.Tables[e.TableID]
 	if !ok {
 		return fmt.Errorf("invalid table id %d, no correspond table map event", e.TableID)
 	}
@@ -263,7 +263,7 @@ func (e *RowsEvent) Decode(data []byte) error {
 		}
 		pos += n
 
-		if e.needBitmap2 {
+		if e.NeedBitmap2 {
 			if n, err = e.decodeRows(data[pos:], e.Table, e.ColumnBitmap2); err != nil {
 				return err
 			}
