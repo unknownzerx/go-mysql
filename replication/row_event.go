@@ -1,17 +1,12 @@
 package replication
 
 import (
-	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"io"
-	"math"
-	"strconv"
-	"time"
 
 	. "github.com/siddontang/go-mysql/mysql"
-	"github.com/siddontang/go/hack"
 )
 
 type TableMapEvent struct {
@@ -216,7 +211,7 @@ type RowsEvent struct {
 	ColumnBitmap2 []byte
 
 	//rows: invalid: int64, float64, bool, []byte, string
-	Rows [][]interface{}
+	Rows [][][]byte
 }
 
 func (e *RowsEvent) Decode(data []byte) error {
@@ -275,7 +270,7 @@ func (e *RowsEvent) Decode(data []byte) error {
 }
 
 func (e *RowsEvent) decodeRows(data []byte, table *TableMapEvent, bitmap []byte) (int, error) {
-	rows := make([]interface{}, e.ColumnCount)
+	rows := make([][]byte, e.ColumnCount)
 
 	pos := 0
 
@@ -316,7 +311,7 @@ func (e *RowsEvent) decodeRows(data []byte, table *TableMapEvent, bitmap []byte)
 }
 
 // see mysql sql/log_event.cc log_event_print_value
-func (e *RowsEvent) decodeValue(data []byte, tp byte, meta uint16) (v interface{}, n int, err error) {
+func (e *RowsEvent) decodeValue(data []byte, tp byte, meta uint16) (v []byte, n int, err error) {
 	var length int = 0
 
 	if tp == MYSQL_TYPE_STRING {
@@ -341,91 +336,65 @@ func (e *RowsEvent) decodeValue(data []byte, tp byte, meta uint16) (v interface{
 		return nil, 0, nil
 	case MYSQL_TYPE_LONG:
 		n = 4
-		v = int64(binary.LittleEndian.Uint32(data))
+		v = data[0:4]
 	case MYSQL_TYPE_TINY:
 		n = 1
-		v = int64(data[0])
+		v = data[0:1]
 	case MYSQL_TYPE_SHORT:
 		n = 2
-		v = int64(binary.LittleEndian.Uint16(data))
+		v = data[0:2]
 	case MYSQL_TYPE_INT24:
 		n = 3
-		v = int64(FixedLengthInt(data[0:3]))
+		v = data[0:3]
 	case MYSQL_TYPE_LONGLONG:
 		//em, maybe overflow for int64......
 		n = 8
-		v = int64(binary.LittleEndian.Uint64(data))
+		v = data[0:8]
 	case MYSQL_TYPE_NEWDECIMAL:
 		prec := uint8(meta >> 8)
 		scale := uint8(meta & 0xFF)
 		v, n, err = decodeDecimal(data, int(prec), int(scale))
 	case MYSQL_TYPE_FLOAT:
 		n = 4
-		v = float64(math.Float32frombits(binary.LittleEndian.Uint32(data)))
+		v = data[0:4]
 	case MYSQL_TYPE_DOUBLE:
 		n = 8
-		v = math.Float64frombits(binary.LittleEndian.Uint64(data))
+		v = data[0:4]
 	case MYSQL_TYPE_BIT:
 		nbits := ((meta >> 8) * 8) + (meta & 0xFF)
 		n = int(nbits+7) / 8
-
-		//use int64 for bit
-		v, err = decodeBit(data, int(nbits), int(n))
+		v = data[0:n]
 	case MYSQL_TYPE_TIMESTAMP:
 		n = 4
-		t := binary.LittleEndian.Uint32(data)
-		v = time.Unix(int64(t), 0)
+		//t := binary.LittleEndian.Uint32(data)
+		v = data[0:4]
 	case MYSQL_TYPE_TIMESTAMP2:
 		v, n, err = decodeTimestamp2(data, meta)
 	case MYSQL_TYPE_DATETIME:
 		n = 8
-		i64 := binary.LittleEndian.Uint64(data)
-		d := i64 / 1000000
-		t := i64 % 1000000
-		v = time.Date(int(d/10000),
-			time.Month((d%10000)/100),
-			int(d%100),
-			int(t/10000),
-			int((t%10000)/100),
-			int(t%100),
-			0,
-			time.UTC).Format(TimeFormat)
+		v = data[0:8]
 	case MYSQL_TYPE_DATETIME2:
 		v, n, err = decodeDatetime2(data, meta)
 	case MYSQL_TYPE_TIME:
 		n = 3
-		i32 := uint32(FixedLengthInt(data[0:3]))
-		if i32 == 0 {
-			v = "00:00:00"
-		} else {
-			sign := ""
-			if i32 < 0 {
-				sign = "-"
-			}
-			v = fmt.Sprintf("%s%02d:%02d:%02d", sign, i32/10000, (i32%10000)/100, i32%100)
-		}
+		v = data[0:3]
 	case MYSQL_TYPE_TIME2:
 		v, n, err = decodeTime2(data, meta)
 	case MYSQL_TYPE_DATE:
 		n = 3
-		i32 := uint32(FixedLengthInt(data[0:3]))
-		if i32 == 0 {
-			v = "0000-00-00"
-		} else {
-			v = fmt.Sprintf("%04d-%02d-%02d", i32/(16*32), i32/32%16, i32%32)
-		}
+		v = data[0:3]
 
 	case MYSQL_TYPE_YEAR:
 		n = 1
-		v = int(data[0]) + 1900
+		v = data[0:1]
 	case MYSQL_TYPE_ENUM:
 		l := meta & 0xFF
 		switch l {
 		case 1:
-			v = int64(data[0])
+			v = data[0:1]
 			n = 1
 		case 2:
-			v = int64(binary.BigEndian.Uint16(data))
+			v = data[0:2]
 			n = 2
 		default:
 			err = fmt.Errorf("Unknown ENUM packlen=%d", l)
@@ -433,31 +402,29 @@ func (e *RowsEvent) decodeValue(data []byte, tp byte, meta uint16) (v interface{
 	case MYSQL_TYPE_SET:
 		nbits := meta & 0xFF
 		n = int(nbits+7) / 8
-
-		v, err = decodeBit(data, int(nbits), n)
+		v = data[0:n]
 	case MYSQL_TYPE_BLOB:
 		switch meta {
 		case 1:
 			length = int(data[0])
-			v = data[1 : 1+length]
+			v = data[0 : 1+length]
 			n = length + 1
 		case 2:
 			length = int(binary.LittleEndian.Uint16(data))
-			v = data[2 : 2+length]
+			v = data[0 : 2+length]
 			n = length + 2
 		case 3:
 			length = int(FixedLengthInt(data[0:3]))
-			v = data[3 : 3+length]
+			v = data[0 : 3+length]
 			n = length + 3
 		case 4:
 			length = int(binary.LittleEndian.Uint32(data))
-			v = data[4 : 4+length]
+			v = data[0 : 4+length]
 			n = length + 4
 		default:
 			err = fmt.Errorf("invalid blob packlen = %d", meta)
 		}
-	case MYSQL_TYPE_VARCHAR,
-		MYSQL_TYPE_VAR_STRING:
+	case MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VAR_STRING:
 		length = int(meta)
 		v, n = decodeString(data, length)
 	case MYSQL_TYPE_STRING:
@@ -468,16 +435,16 @@ func (e *RowsEvent) decodeValue(data []byte, tp byte, meta uint16) (v interface{
 	return
 }
 
-func decodeString(data []byte, length int) (v string, n int) {
+func decodeString(data []byte, length int) (v []byte, n int) {
 	if length < 256 {
 		length = int(data[0])
 
 		n = int(length) + 1
-		v = hack.String(data[1:n])
+		v = data[0:n]
 	} else {
 		length = int(binary.LittleEndian.Uint16(data[0:]))
 		n = length + 2
-		v = hack.String(data[2:n])
+		v = data[0:n]
 	}
 
 	return
@@ -487,7 +454,9 @@ const digitsPerInteger int = 9
 
 var compressedBytes = []int{0, 1, 1, 2, 2, 3, 3, 4, 4, 4}
 
-func decodeDecimal(data []byte, precision int, decimals int) (float64, int, error) {
+func decodeDecimal(data []byte, precision int, decimals int) ([]byte, int, error) {
+	// fwh mod: let's concerning on the data flow of pos
+	
 	//see python mysql replication and https://github.com/jeremycole/mysql_binlog
 	pos := 0
 
@@ -497,66 +466,69 @@ func decodeDecimal(data []byte, precision int, decimals int) (float64, int, erro
 	compIntegral := integral - (uncompIntegral * digitsPerInteger)
 	compFractional := decimals - (uncompFractional * digitsPerInteger)
 
-	binSize := uncompIntegral*4 + compressedBytes[compIntegral] +
-		uncompFractional*4 + compressedBytes[compFractional]
+	//binSize := uncompIntegral*4 + compressedBytes[compIntegral] +
+	//	uncompFractional*4 + compressedBytes[compFractional]
 
-	buf := make([]byte, binSize)
-	copy(buf, data[:binSize])
+	//buf := make([]byte, binSize)
+	//copy(buf, data[:binSize])
 
 	//must copy the data for later change
-	data = buf
+	//data = buf
 
 	// Support negative
 	// The sign is encoded in the high bit of the the byte
 	// But this bit can also be used in the value
-	value := uint32(data[pos])
-	var res bytes.Buffer
-	var mask uint32 = 0
-	if value&0x80 != 0 {
-		mask = 0
-	} else {
-		mask = uint32((1 << 32) - 1)
-		res.WriteString("-")
-	}
+	//value := uint32(data[pos])
+	//var res bytes.Buffer
+	//var mask uint32 = 0
+	//if value&0x80 != 0 {
+	//	mask = 0
+	//} else {
+	//	mask = uint32((1 << 32) - 1)
+	//	res.WriteString("-")
+	//}
 
 	//clear sign
-	data[0] ^= 0x80
+	//data[0] ^= 0x80
 
 	size := compressedBytes[compIntegral]
 	if size > 0 {
-		value = uint32(BFixedLengthInt(data[pos:pos+size])) ^ mask
-		res.WriteString(fmt.Sprintf("%d", value))
+		//value = uint32(BFixedLengthInt(data[pos:pos+size])) ^ mask
+		//res.WriteString(fmt.Sprintf("%d", value))
 		pos += size
 	}
 
-	for i := 0; i < uncompIntegral; i++ {
+	/*for i := 0; i < uncompIntegral; i++ {
 		value = binary.BigEndian.Uint32(data[pos:]) ^ mask
 		pos += 4
 		res.WriteString(fmt.Sprintf("%09d", value))
-	}
+	}*/
+	pos += uncompIntegral
 
-	res.WriteString(".")
+	//res.WriteString(".")
 
-	for i := 0; i < uncompFractional; i++ {
+
+	/*for i := 0; i < uncompFractional; i++ {
 		value = binary.BigEndian.Uint32(data[pos:]) ^ mask
 		pos += 4
 		res.WriteString(fmt.Sprintf("%09d", value))
-	}
+	}*/
+	pos += 4 * uncompFractional
 
 	size = compressedBytes[compFractional]
 	if size > 0 {
-		value = uint32(BFixedLengthInt(data[pos:pos+size])) ^ mask
+		//value = uint32(BFixedLengthInt(data[pos:pos+size])) ^ mask
 		pos += size
 
 		// we could not use %0*d directly, value is uint32, if compFractional is 2, size is 1, we should only print
 		// uint8(value) with width compFractional, not uint32(value), otherwise, the output would be incorrect.
 		// res.WriteString(fmt.Sprintf("%0*d", compFractional, value))
-		res.WriteString(fmt.Sprintf("%0*d", compFractional, value%(uint32(size)<<8)))
+		//res.WriteString(fmt.Sprintf("%0*d", compFractional, value%(uint32(size)<<8)))
 	}
 
 	//return hack.String(res.Bytes()), pos, nil
-	f, err := strconv.ParseFloat(hack.String(res.Bytes()), 64)
-	return f, pos, err
+	//f, err := strconv.ParseFloat(hack.String(res.Bytes()), 64)
+	return data[0:pos], pos, nil
 }
 
 func decodeBit(data []byte, nbits int, length int) (value int64, err error) {
@@ -591,156 +563,27 @@ func decodeBit(data []byte, nbits int, length int) (value int64, err error) {
 	return
 }
 
-func decodeTimestamp2(data []byte, dec uint16) (string, int, error) {
+func decodeTimestamp2(data []byte, dec uint16) ([]byte, int, error) {
 	//get timestamp binary length
 	n := int(4 + (dec+1)/2)
-	sec := int64(binary.BigEndian.Uint32(data[0:4]))
-	usec := int64(0)
-	switch dec {
-	case 1, 2:
-		usec = int64(data[4]) * 10000
-	case 3, 4:
-		usec = int64(binary.BigEndian.Uint16(data[4:])) * 100
-	case 5, 6:
-		usec = int64(BFixedLengthInt(data[4:7]))
-	}
-
-	if sec == 0 {
-		return "0000-00-00 00:00:00", n, nil
-	}
-
-	t := time.Unix(sec, usec*1000)
-	return t.Format(TimeFormat), n, nil
+	return data[0:n], n, nil
 }
 
 const DATETIMEF_INT_OFS int64 = 0x8000000000
 
-func decodeDatetime2(data []byte, dec uint16) (string, int, error) {
+func decodeDatetime2(data []byte, dec uint16) ([]byte, int, error) {
 	//get datetime binary length
 	n := int(5 + (dec+1)/2)
-
-	intPart := int64(BFixedLengthInt(data[0:5])) - DATETIMEF_INT_OFS
-	var frac int64 = 0
-
-	switch dec {
-	case 1, 2:
-		frac = int64(data[5]) * 10000
-	case 3, 4:
-		frac = int64(binary.BigEndian.Uint16(data[5:7])) * 100
-	case 5, 6:
-		frac = int64(BFixedLengthInt(data[5:8]))
-	}
-
-	if intPart == 0 {
-		return "0000-00-00 00:00:00", n, nil
-	}
-
-	tmp := intPart<<24 + frac
-	//handle sign???
-	if tmp < 0 {
-		tmp = -tmp
-	}
-
-	//ingore second part, no precision now
-	//var secPart int64 = tmp % (1 << 24)
-	ymdhms := tmp >> 24
-
-	ymd := ymdhms >> 17
-	ym := ymd >> 5
-	hms := ymdhms % (1 << 17)
-
-	day := int(ymd % (1 << 5))
-	month := int(ym % 13)
-	year := int(ym / 13)
-
-	second := int(hms % (1 << 6))
-	minute := int((hms >> 6) % (1 << 6))
-	hour := int((hms >> 12))
-
-	return fmt.Sprintf("%04d-%02d-%02d %02d:%02d:%02d", year, month, day, hour, minute, second), n, nil
+	return data[0:n], n, nil
 }
 
 const TIMEF_OFS int64 = 0x800000000000
 const TIMEF_INT_OFS int64 = 0x800000
 
-func decodeTime2(data []byte, dec uint16) (string, int, error) {
+func decodeTime2(data []byte, dec uint16) ([]byte, int, error) {
 	//time  binary length
 	n := int(3 + (dec+1)/2)
-
-	tmp := int64(0)
-	intPart := int64(0)
-	frac := int64(0)
-	switch dec {
-	case 1:
-	case 2:
-		intPart = int64(BFixedLengthInt(data[0:3])) - TIMEF_INT_OFS
-		frac = int64(data[3])
-		if intPart < 0 && frac > 0 {
-			/*
-			   Negative values are stored with reverse fractional part order,
-			   for binary sort compatibility.
-
-			     Disk value  intpart frac   Time value   Memory value
-			     800000.00    0      0      00:00:00.00  0000000000.000000
-			     7FFFFF.FF   -1      255   -00:00:00.01  FFFFFFFFFF.FFD8F0
-			     7FFFFF.9D   -1      99    -00:00:00.99  FFFFFFFFFF.F0E4D0
-			     7FFFFF.00   -1      0     -00:00:01.00  FFFFFFFFFF.000000
-			     7FFFFE.FF   -1      255   -00:00:01.01  FFFFFFFFFE.FFD8F0
-			     7FFFFE.F6   -2      246   -00:00:01.10  FFFFFFFFFE.FE7960
-
-			     Formula to convert fractional part from disk format
-			     (now stored in "frac" variable) to absolute value: "0x100 - frac".
-			     To reconstruct in-memory value, we shift
-			     to the next integer value and then substruct fractional part.
-			*/
-			intPart++     /* Shift to the next integer value */
-			frac -= 0x100 /* -(0x100 - frac) */
-		}
-		tmp = intPart<<24 + frac*10000
-	case 3:
-	case 4:
-		intPart = int64(BFixedLengthInt(data[0:3])) - TIMEF_INT_OFS
-		frac = int64(binary.BigEndian.Uint16(data[3:5]))
-		if intPart < 0 && frac > 0 {
-			/*
-			   Fix reverse fractional part order: "0x10000 - frac".
-			   See comments for FSP=1 and FSP=2 above.
-			*/
-			intPart++       /* Shift to the next integer value */
-			frac -= 0x10000 /* -(0x10000-frac) */
-		}
-		tmp = intPart<<24 + frac*100
-
-	case 5:
-	case 6:
-		tmp = int64(BFixedLengthInt(data[0:6])) - TIMEF_OFS
-	default:
-		intPart = int64(BFixedLengthInt(data[0:3])) - TIMEF_INT_OFS
-		tmp = intPart << 24
-	}
-
-	if intPart == 0 {
-		return "00:00:00", n, nil
-	}
-
-	hms := int64(0)
-	sign := ""
-	if tmp < 0 {
-		tmp = -tmp
-		sign = "-"
-	}
-
-	//ingore second part, no precision now
-	//var secPart int64 = tmp % (1 << 24)
-
-	hms = tmp >> 24
-
-	hour := (hms >> 12) % (1 << 10) /* 10 bits starting at 12th */
-	minute := (hms >> 6) % (1 << 6) /* 6 bits starting at 6th   */
-	second := hms % (1 << 6)        /* 6 bits starting at 0th   */
-	// 	secondPart := tmp % (1 << 24)
-
-	return fmt.Sprintf("%s%02d:%02d:%02d", sign, hour, minute, second), n, nil
+	return data[0:n], n, nil
 }
 
 func (e *RowsEvent) Dump(w io.Writer) {
@@ -752,11 +595,7 @@ func (e *RowsEvent) Dump(w io.Writer) {
 	for _, rows := range e.Rows {
 		fmt.Fprintf(w, "--\n")
 		for j, d := range rows {
-			if _, ok := d.([]byte); ok {
-				fmt.Fprintf(w, "%d:%q\n", j, d)
-			} else {
-				fmt.Fprintf(w, "%d:%#v\n", j, d)
-			}
+			fmt.Fprintf(w, "%d:%q\n", j, d)
 		}
 	}
 	fmt.Fprintln(w)
