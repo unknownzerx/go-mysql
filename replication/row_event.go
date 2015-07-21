@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-
+	//"github.com/siddontang/go/hack"
 	. "github.com/siddontang/go-mysql/mysql"
 )
 
@@ -359,14 +359,13 @@ func (e *RowsEvent) decodeValue(data []byte, tp byte, meta uint16) (v []byte, n 
 		v = data[0:4]
 	case MYSQL_TYPE_DOUBLE:
 		n = 8
-		v = data[0:4]
+		v = data[0:8]
 	case MYSQL_TYPE_BIT:
 		nbits := ((meta >> 8) * 8) + (meta & 0xFF)
 		n = int(nbits+7) / 8
 		v = data[0:n]
 	case MYSQL_TYPE_TIMESTAMP:
 		n = 4
-		//t := binary.LittleEndian.Uint32(data)
 		v = data[0:4]
 	case MYSQL_TYPE_TIMESTAMP2:
 		v, n, err = decodeTimestamp2(data, meta)
@@ -503,7 +502,7 @@ func decodeDecimal(data []byte, precision int, decimals int) ([]byte, int, error
 		pos += 4
 		res.WriteString(fmt.Sprintf("%09d", value))
 	}*/
-	pos += uncompIntegral
+	pos += uncompIntegral * 4
 
 	//res.WriteString(".")
 
