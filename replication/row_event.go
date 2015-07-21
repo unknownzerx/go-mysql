@@ -7,6 +7,7 @@ import (
 	"io"
 	//"github.com/siddontang/go/hack"
 	. "github.com/siddontang/go-mysql/mysql"
+	"gofaster/crc32"
 )
 
 type TableMapEvent struct {
@@ -211,7 +212,7 @@ type RowsEvent struct {
 	ColumnBitmap2 []byte
 
 	//rows: invalid: int64, float64, bool, []byte, string
-	Rows [][][]byte
+	Rows [][]uint32
 }
 
 func (e *RowsEvent) Decode(data []byte) error {
@@ -270,7 +271,7 @@ func (e *RowsEvent) Decode(data []byte) error {
 }
 
 func (e *RowsEvent) decodeRows(data []byte, table *TableMapEvent, bitmap []byte) (int, error) {
-	rows := make([][]byte, e.ColumnCount)
+	rows := make([]uint32, e.ColumnCount)
 
 	pos := 0
 
@@ -291,7 +292,7 @@ func (e *RowsEvent) decodeRows(data []byte, table *TableMapEvent, bitmap []byte)
 		}
 
 		if isNull > 0 {
-			rows[i] = nil
+			rows[i] = 0
 			nullbitIndex++
 			continue
 		}
@@ -311,9 +312,10 @@ func (e *RowsEvent) decodeRows(data []byte, table *TableMapEvent, bitmap []byte)
 }
 
 // see mysql sql/log_event.cc log_event_print_value
-func (e *RowsEvent) decodeValue(data []byte, tp byte, meta uint16) (v []byte, n int, err error) {
+func (e *RowsEvent) decodeValue(data []byte, tp byte, meta uint16) (v uint32, n int, err error) {
 	var length int = 0
-
+	var d []byte
+	
 	if tp == MYSQL_TYPE_STRING {
 		if meta >= 256 {
 			b0 := uint8(meta >> 8)
@@ -333,67 +335,67 @@ func (e *RowsEvent) decodeValue(data []byte, tp byte, meta uint16) (v []byte, n 
 
 	switch tp {
 	case MYSQL_TYPE_NULL:
-		return nil, 0, nil
+		return 0, 0, nil
 	case MYSQL_TYPE_LONG:
 		n = 4
-		v = data[0:4]
+		d = data[0:4]
 	case MYSQL_TYPE_TINY:
 		n = 1
-		v = data[0:1]
+		d = data[0:1]
 	case MYSQL_TYPE_SHORT:
 		n = 2
-		v = data[0:2]
+		d = data[0:2]
 	case MYSQL_TYPE_INT24:
 		n = 3
-		v = data[0:3]
+		d = data[0:3]
 	case MYSQL_TYPE_LONGLONG:
 		//em, maybe overflow for int64......
 		n = 8
-		v = data[0:8]
+		d = data[0:8]
 	case MYSQL_TYPE_NEWDECIMAL:
 		prec := uint8(meta >> 8)
 		scale := uint8(meta & 0xFF)
-		v, n, err = decodeDecimal(data, int(prec), int(scale))
+		d, n, err = decodeDecimal(data, int(prec), int(scale))
 	case MYSQL_TYPE_FLOAT:
 		n = 4
-		v = data[0:4]
+		d = data[0:4]
 	case MYSQL_TYPE_DOUBLE:
 		n = 8
-		v = data[0:8]
+		d = data[0:8]
 	case MYSQL_TYPE_BIT:
 		nbits := ((meta >> 8) * 8) + (meta & 0xFF)
 		n = int(nbits+7) / 8
-		v = data[0:n]
+		d = data[0:n]
 	case MYSQL_TYPE_TIMESTAMP:
 		n = 4
-		v = data[0:4]
+		d = data[0:4]
 	case MYSQL_TYPE_TIMESTAMP2:
-		v, n, err = decodeTimestamp2(data, meta)
+		d, n, err = decodeTimestamp2(data, meta)
 	case MYSQL_TYPE_DATETIME:
 		n = 8
-		v = data[0:8]
+		d = data[0:8]
 	case MYSQL_TYPE_DATETIME2:
-		v, n, err = decodeDatetime2(data, meta)
+		d, n, err = decodeDatetime2(data, meta)
 	case MYSQL_TYPE_TIME:
 		n = 3
-		v = data[0:3]
+		d = data[0:3]
 	case MYSQL_TYPE_TIME2:
-		v, n, err = decodeTime2(data, meta)
+		d, n, err = decodeTime2(data, meta)
 	case MYSQL_TYPE_DATE:
 		n = 3
-		v = data[0:3]
+		d = data[0:3]
 
 	case MYSQL_TYPE_YEAR:
 		n = 1
-		v = data[0:1]
+		d = data[0:1]
 	case MYSQL_TYPE_ENUM:
 		l := meta & 0xFF
 		switch l {
 		case 1:
-			v = data[0:1]
+			d = data[0:1]
 			n = 1
 		case 2:
-			v = data[0:2]
+			d = data[0:2]
 			n = 2
 		default:
 			err = fmt.Errorf("Unknown ENUM packlen=%d", l)
@@ -401,36 +403,38 @@ func (e *RowsEvent) decodeValue(data []byte, tp byte, meta uint16) (v []byte, n 
 	case MYSQL_TYPE_SET:
 		nbits := meta & 0xFF
 		n = int(nbits+7) / 8
-		v = data[0:n]
+		d = data[0:n]
 	case MYSQL_TYPE_BLOB:
 		switch meta {
 		case 1:
 			length = int(data[0])
-			v = data[0 : 1+length]
+			d = data[0 : 1+length]
 			n = length + 1
 		case 2:
 			length = int(binary.LittleEndian.Uint16(data))
-			v = data[0 : 2+length]
+			d = data[0 : 2+length]
 			n = length + 2
 		case 3:
 			length = int(FixedLengthInt(data[0:3]))
-			v = data[0 : 3+length]
+			d = data[0 : 3+length]
 			n = length + 3
 		case 4:
 			length = int(binary.LittleEndian.Uint32(data))
-			v = data[0 : 4+length]
+			d = data[0 : 4+length]
 			n = length + 4
 		default:
 			err = fmt.Errorf("invalid blob packlen = %d", meta)
 		}
 	case MYSQL_TYPE_VARCHAR, MYSQL_TYPE_VAR_STRING:
 		length = int(meta)
-		v, n = decodeString(data, length)
+		d, n = decodeString(data, length)
 	case MYSQL_TYPE_STRING:
-		v, n = decodeString(data, length)
+		d, n = decodeString(data, length)
 	default:
 		err = fmt.Errorf("unsupport type %d in binlog and don't know how to handle", tp)
 	}
+	
+	v = crc32.ChecksumIEEE(d)
 	return
 }
 
